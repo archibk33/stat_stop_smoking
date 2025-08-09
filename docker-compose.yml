@@ -1,0 +1,33 @@
+services:
+  db:
+    image: postgres:16
+    container_name: smoking_free_db
+    environment:
+      POSTGRES_DB: smoking_free
+      POSTGRES_USER: app
+      POSTGRES_PASSWORD: app
+    ports:
+      - "5432:5432"
+    volumes:
+      - db_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U app -d smoking_free"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  bot:
+    build: .
+    container_name: smoking_free_bot
+    depends_on:
+      db:
+        condition: service_healthy
+    env_file:
+      - .env
+    environment:
+      DATABASE_URL: postgresql+asyncpg://app:app@db:5432/smoking_free
+    restart: unless-stopped
+
+volumes:
+  db_data:
+    driver: local
