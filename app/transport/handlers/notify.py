@@ -1,10 +1,11 @@
 from __future__ import annotations
 
 from aiogram import Router, F
-from aiogram.types import CallbackQuery
+from aiogram.types import CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton
 
 from app.db.repo import UserRepo
 from app.db.session import AsyncSession, async_sessionmaker
+from app.transport.handlers.menu_utils import update_message_with_menu
 
 router = Router()
 
@@ -30,4 +31,18 @@ async def on_notify_toggle(callback: CallbackQuery, session_factory: async_sessi
         await repo.set_notifications(user_id, enabled)
         await session.commit()
 
-    await callback.message.answer("Напоминания: " + ("Включены" if enabled else "Выключены"))
+    # Создаем клавиатуру с кнопками
+    kb = InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="❓ Помощь", callback_data="help:show")],
+            [InlineKeyboardButton(text="🏠 Главное меню", callback_data="menu:main")],
+        ]
+    )
+    
+    status_text = "✅ Включены" if enabled else "❌ Выключены"
+    await update_message_with_menu(
+        callback, 
+        f"🔔 Напоминания: {status_text}", 
+        kb, 
+        add_main_menu=False
+    )

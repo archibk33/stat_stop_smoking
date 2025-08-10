@@ -1,32 +1,21 @@
 from __future__ import annotations
 
 import structlog
-from aiogram import Router
+from aiogram import Router, F
 from aiogram.filters import Command
-from aiogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery
+from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton
 
-from app.config import get_settings
 from app.db.repo import MetricsRepo, TopPostRepo
 from app.db.session import AsyncSession, async_sessionmaker
+from app.transport.handlers.menu_utils import update_message_with_menu
 
 router = Router()
 
 
-def top_inline_kb(bot_username: str) -> InlineKeyboardMarkup:
-    deep_link = f"https://t.me/{bot_username}?start=me"
-    return InlineKeyboardMarkup(
-        inline_keyboard=[
-            [InlineKeyboardButton(text="📥 Мой статус в ЛС", url=deep_link)],
-            [InlineKeyboardButton(text="🔄 Обновить ТОП", callback_data="top:refresh")],
-            [InlineKeyboardButton(text="📌 Закрепить", callback_data="top:pin")],
-        ]
-    )
-
-
-async def build_top_text(session_factory: async_sessionmaker[AsyncSession]) -> str:
+async def build_top_text(session_factory: async_sessionmaker[AsyncSession], limit: int | None = 10) -> str:
     async with session_factory() as session:
         repo = MetricsRepo(session)
-        top = await repo.get_top(limit=10)
+        top = await repo.get_top(limit=limit)
 
     if not top:
         return "Пока нет участников в рейтинге."
@@ -34,29 +23,129 @@ async def build_top_text(session_factory: async_sessionmaker[AsyncSession]) -> s
     lines = []
     medals = ["🥇", "🥈", "🥉"]
     for idx, (user, metrics) in enumerate(top, start=1):
-        prefix = medals[idx - 1] if idx <= 3 else f"{idx}."
+        # Добавляем медальки только для первых трех мест
+        if idx <= 3:
+            prefix = medals[idx - 1]
+        else:
+            prefix = f"{idx}."
+        
         name = user.full_name or user.username or str(user.user_id)
-        lines.append(f"{prefix} {name} — {metrics.days} дн.")
+        # Рассчитываем рейтинг
+        score = metrics.days - (metrics.relapses * 3)
+        # Добавляем информацию о рецидивах и рейтинге
+        relapse_text = f" (рецидивов: {metrics.relapses}, рейтинг: {score})" if metrics.relapses > 0 else f" (рейтинг: {score})"
+        lines.append(f"{prefix} {name} — {metrics.days} дн.{relapse_text}")
 
-    return "ТОП-10:\n" + "\n".join(lines)
+    # Формируем заголовок в зависимости от лимита
+    if limit is None:
+        header = "Вся таблица рейтинга:"
+    elif limit == 10:
+        header = "ТОП-10:"
+    elif limit == 50:
+        header = "ТОП-50:"
+    elif limit == 100:
+        header = "ТОП-100:"
+    else:
+        header = f"ТОП-{limit}:"
+    
+    return f"{header}\n" + "\n".join(lines)
+
+
+@router.callback_query(lambda c: c.data == "add_relapse")
+async def add_relapse_callback(callback: CallbackQuery, session_factory: async_sessionmaker[AsyncSession]) -> None:
+    """Добавляет рецидив пользователю через кнопку"""
+    log = structlog.get_logger()
+    bot = callback.bot
+    
+    # Получаем ID пользователя из callback
+    user_id = callback.from_user.id
+    
+    async with session_factory() as session:
+        metrics_repo = MetricsRepo(session)
+        try:
+            metrics = await metrics_repo.add_relapse(user_id)
+            relapse_count = metrics.relapses
+            
+            if relapse_count <= 3:
+                text = f"Рецидив добавлен. У вас {relapse_count} рецидивов. Счетчик дней не сброшен."
+            else:
+                text = f"Рецидив добавлен. У вас {relapse_count} рецидивов. Счетчик дней сброшен."
+            
+            # Импортируем здесь чтобы избежать циклических импортов
+            from app.transport.handlers.menu_utils import update_message_with_menu
+            
+            # Создаем клавиатуру с кнопками
+            kb = InlineKeyboardMarkup(
+                inline_keyboard=[
+                    [InlineKeyboardButton(text="❓ Помощь", callback_data="help:show")],
+                ]
+            )
+            
+            # Используем update_message_with_menu для добавления кнопки "Главное меню"
+            await update_message_with_menu(callback, text, kb, add_main_menu=True)
+            
+            await session.commit()
+            log.info("relapse_added", user_id=user_id, relapse_count=relapse_count)
+            
+        except Exception as e:
+            log.error("relapse_add_failed", user_id=user_id, error=str(e))
+            
+            # Импортируем здесь чтобы избежать циклических импортов
+            from app.transport.handlers.menu_utils import update_message_with_menu
+            
+            # Создаем клавиатуру с кнопками
+            kb = InlineKeyboardMarkup(
+                inline_keyboard=[
+                    [InlineKeyboardButton(text="❓ Помощь", callback_data="help:show")],
+                ]
+            )
+            
+            # Используем update_message_with_menu для добавления кнопки "Главное меню"
+            await update_message_with_menu(callback, "Ошибка при добавлении рецидива. Попробуйте позже.", kb, add_main_menu=True)
+
+
+@router.callback_query(F.data == "top:show")
+async def show_top_in_private(callback: CallbackQuery, session_factory: async_sessionmaker[AsyncSession]) -> None:
+    """Показывает ТОП-10 в приватном чате"""
+    await callback.answer()
+    
+    text = await build_top_text(session_factory, limit=10)
+    
+    # Создаем клавиатуру с кнопками
+    kb = InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="❓ Помощь", callback_data="help:show")],
+        ]
+    )
+    
+    await update_message_with_menu(callback, text, kb, add_main_menu=True)
 
 
 @router.message(Command("top_members"))
 async def top_members(message: Message, session_factory: async_sessionmaker[AsyncSession]) -> None:
     log = structlog.get_logger()
+    
+    # Проверяем, что это групповой чат
+    if message.chat.type == "private":
+        log.info("top_members_command_in_private", user_id=message.from_user.id)
+        return
+    
     bot = message.bot
-    me = await bot.get_me()
-    text = await build_top_text(session_factory)
+    text = await build_top_text(session_factory, limit=10)
 
-    settings = get_settings()
+    # В общем чате не показываем кнопки - только список
+    kb = InlineKeyboardMarkup(inline_keyboard=[])
+
+    # Определяем параметры для отправки сообщения
+    topic_id = message.message_thread_id
     params = {}
-    if settings.topic_id is not None and message.chat.id == settings.group_chat_id:
-        params["message_thread_id"] = settings.topic_id
+    if topic_id is not None:
+        params["message_thread_id"] = topic_id
 
-    # Удалим предыдущий пост ТОПа, если был
+    # Удалим предыдущий пост ТОПа, если был в том же топике
     async with session_factory() as session:
         top_repo = TopPostRepo(session)
-        prev = await top_repo.get_for_chat(message.chat.id)
+        prev = await top_repo.get_for_chat(message.chat.id, topic_id)
         if prev is not None:
             try:
                 await bot.delete_message(chat_id=message.chat.id, message_id=prev.message_id)
@@ -66,15 +155,16 @@ async def top_members(message: Message, session_factory: async_sessionmaker[Asyn
         sent = await bot.send_message(
             chat_id=message.chat.id,
             text=text,
-            reply_markup=top_inline_kb(me.username),
+            reply_markup=kb,
             **params,
         )
 
-        await top_repo.set(message.chat.id, sent.message_id)
+        await top_repo.set(message.chat.id, sent.message_id, topic_id)
         await session.commit()
 
     # Диагностика прав бота
     try:
+        me = await bot.get_me()
         me_member = await bot.get_chat_member(message.chat.id, me.id)
         can_delete = getattr(getattr(me_member, "can_delete_messages", None), "__bool__", lambda: False)()
         log.info("bot_rights", can_delete_messages=bool(getattr(me_member, "can_delete_messages", False)))
@@ -83,30 +173,15 @@ async def top_members(message: Message, session_factory: async_sessionmaker[Asyn
 
     # Пытаемся удалить командное сообщение пользователя (требуются права delete_messages)
     try:
-        await bot.delete_message(chat_id=message.chat.id, message_id=message.message_id)
+        # Проверяем права бота перед удалением
+        me = await bot.get_me()
+        me_member = await bot.get_chat_member(message.chat.id, me.id)
+        can_delete = getattr(me_member, "can_delete_messages", False)
+        
+        if can_delete:
+            await bot.delete_message(chat_id=message.chat.id, message_id=message.message_id)
+            log.info("Command message deleted successfully")
+        else:
+            log.info("Bot doesn't have permission to delete messages")
     except Exception as e:  # noqa: BLE001
         log.warning("top_command_delete_failed", error=str(e))
-
-
-@router.callback_query(lambda c: c.data == "top:refresh")
-async def top_refresh(callback: CallbackQuery, session_factory: async_sessionmaker[AsyncSession]) -> None:
-    await callback.answer()
-    bot = callback.message.bot
-    me = await bot.get_me()
-    new_text = await build_top_text(session_factory)
-
-    if (callback.message.text or "").strip() == new_text.strip():
-        await callback.answer("ТОП уже актуален", show_alert=False)
-        return
-
-    await callback.message.edit_text(new_text, reply_markup=top_inline_kb(me.username))
-
-
-@router.callback_query(lambda c: c.data == "top:pin")
-async def top_pin(callback: CallbackQuery) -> None:
-    await callback.answer()
-    settings = get_settings()
-    try:
-        await callback.message.bot.pin_chat_message(chat_id=settings.group_chat_id, message_id=callback.message.message_id)
-    except Exception:
-        pass

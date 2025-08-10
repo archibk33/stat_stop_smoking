@@ -1,7 +1,6 @@
 from functools import lru_cache
-from typing import Optional
 
-from pydantic import Field, field_validator
+from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -10,7 +9,6 @@ class Settings(BaseSettings):
     database_url: str = Field(alias="DATABASE_URL")
 
     group_chat_id: int = Field(alias="GROUP_CHAT_ID")
-    topic_id: Optional[int] = Field(default=None, alias="TOPIC_ID")
 
     tz: str = Field(default="Europe/Moscow", alias="TZ")
     daily_post_hour: int = Field(default=9, alias="DAILY_POST_HOUR")
@@ -26,16 +24,7 @@ class Settings(BaseSettings):
         case_sensitive=True,
     )
 
-    @field_validator("topic_id", mode="before")
-    @classmethod
-    def _normalize_topic_id(cls, value):  # type: ignore[no-untyped-def]
-        if value is None:
-            return None
-        if isinstance(value, str):
-            stripped = value.strip()
-            if stripped == "":
-                return None
-        return value
+
 
 
 @lru_cache(maxsize=1)
