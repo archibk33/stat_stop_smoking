@@ -119,6 +119,7 @@ async def daily_update(bot: Bot, session_factory: async_sessionmaker[AsyncSessio
 def setup_scheduler(settings: Settings, bot: Bot, session_factory: async_sessionmaker[AsyncSession]) -> AsyncIOScheduler:
     scheduler = AsyncIOScheduler(timezone=ZoneInfo(settings.tz))
 
+
     # ВНИМАНИЕ: тестовый интервал. В продакшене заменить на >= 3600 секунд.
     # Оставляем 30 сек по задаче.
     
