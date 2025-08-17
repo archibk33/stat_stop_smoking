@@ -66,10 +66,7 @@ async def add_relapse_callback(callback: CallbackQuery, session_factory: async_s
             metrics = await metrics_repo.add_relapse(user_id)
             relapse_count = metrics.relapses
             
-            if relapse_count <= 3:
-                text = f"Рецидив добавлен. У вас {relapse_count} рецидивов. Счетчик дней не сброшен."
-            else:
-                text = f"Рецидив добавлен. У вас {relapse_count} рецидивов. Счетчик дней сброшен."
+            text = f"Рецидив добавлен. У вас {relapse_count} рецидивов. Рецидивы влияют на ваш рейтинг."
             
             # Импортируем здесь чтобы избежать циклических импортов
             from app.transport.handlers.menu_utils import update_message_with_menu

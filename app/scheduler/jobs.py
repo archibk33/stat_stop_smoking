@@ -78,10 +78,7 @@ async def daily_update(bot: Bot, session_factory: async_sessionmaker[AsyncSessio
             # Получаем текущие метрики для сохранения количества рецидивов
             current_metrics = await session.get(Metrics, user.user_id)
             if current_metrics and current_metrics.relapses > 0:
-                # Если есть рецидивы, сбрасываем дни только если их больше 3
-                if current_metrics.relapses > 3:
-                    m.days = 0
-                # Сохраняем количество рецидивов
+                # Сохраняем количество рецидивов без сброса дней
                 await metrics_repo.upsert_metrics_with_relapses(user.user_id, m.days, m.saved_money, current_metrics.relapses)
             else:
                 await metrics_repo.upsert_metrics(user.user_id, m.days, m.saved_money)
@@ -101,45 +98,65 @@ async def daily_update(bot: Bot, session_factory: async_sessionmaker[AsyncSessio
                 log.warning("custom_title_update_failed", user_id=user.user_id, error=str(e))
         await session.commit()
 
-    # Личные уведомления
+    log.info("daily_metrics_updated")
+
+
+async def send_morning_notifications(bot: Bot, session_factory: async_sessionmaker[AsyncSession], settings: Settings) -> None:
+    """Отправляет утренние уведомления пользователям"""
+    log = structlog.get_logger()
     try:
         async with session_factory() as session:
             users = UserRepo(session)
             notify_users = await users.list_with_notifications()
+            log.info("sending_morning_notifications", user_count=len(notify_users))
+            
             for u in notify_users:
-                m = calculate_metrics(u.quit_date, u.pack_price)
-                await bot.send_message(chat_id=u.user_id, text=f"Доброе утро! Ваш стаж: {m.days} дн., экономия: {m.saved_money:.0f}₽")
+                try:
+                    m = calculate_metrics(u.quit_date, u.pack_price)
+                    await bot.send_message(
+                        chat_id=u.user_id, 
+                        text=f"Доброе утро! Ваш стаж: {m.days} дн., экономия: {m.saved_money:.0f}₽"
+                    )
+                except Exception as user_error:  # noqa: BLE001
+                    log.warning("notification_failed_for_user", user_id=u.user_id, error=str(user_error))
+                    
     except Exception as e:  # noqa: BLE001
-        log = structlog.get_logger()
-        log.warning("notify_failed", error=str(e))
-
-    log.info("daily_metrics_updated")
+        log.warning("morning_notifications_failed", error=str(e))
 
 
 def setup_scheduler(settings: Settings, bot: Bot, session_factory: async_sessionmaker[AsyncSession]) -> AsyncIOScheduler:
     scheduler = AsyncIOScheduler(timezone=ZoneInfo(settings.tz))
 
-
-    # ВНИМАНИЕ: тестовый интервал. В продакшене заменить на >= 3600 секунд.
-    # Оставляем 30 сек по задаче.
-    
-    # Для тестирования: ТОП-10 каждые 30 секунд
-    scheduler.add_job(
-        func=daily_post_top,
-        args=[bot, session_factory, settings],
-        trigger="interval",
-        seconds=30,
-        id="test_top_post",
-        replace_existing=True,
-    )
-
-    # Для тестирования: обновление метрик каждые 30 секунд
+    # Ежедневное обновление метрик и тайтлов в указанное время
     scheduler.add_job(
         func=daily_update,
         args=[bot, session_factory, settings],
-        trigger="interval",
-        seconds=30,
-        id="test_metrics_update",
+        trigger="cron",
+        hour=settings.daily_post_hour,
+        minute=settings.daily_post_minute,
+        id="daily_metrics_update",
+        replace_existing=True,
+    )
+
+    # Ежедневный пост ТОП-10 в группу через 1 минуту после обновления метрик
+    scheduler.add_job(
+        func=daily_post_top,
+        args=[bot, session_factory, settings],
+        trigger="cron",
+        hour=settings.daily_post_hour,
+        minute=settings.daily_post_minute + 1,
+        id="daily_top_post",
+        replace_existing=True,
+    )
+
+    # Утренние уведомления пользователям через 2 минуты после обновления метрик
+    scheduler.add_job(
+        func=send_morning_notifications,
+        args=[bot, session_factory, settings],
+        trigger="cron",
+        hour=settings.daily_post_hour,
+        minute=settings.daily_post_minute + 2,
+        id="morning_notifications",
         replace_existing=True,
     )
 

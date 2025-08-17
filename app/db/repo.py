@@ -139,7 +139,7 @@ class MetricsRepo:
         return metrics
 
     async def add_relapse(self, user_id: int) -> Metrics:
-        """Добавляет рецидив пользователю и сбрасывает дни если рецидивов больше 3"""
+        """Добавляет рецидив пользователю (без сброса счетчика дней)"""
         metrics = await self.session.get(Metrics, user_id)
         now = datetime.now(timezone.utc)
         if metrics is None:
@@ -147,11 +147,7 @@ class MetricsRepo:
             metrics = Metrics(user_id=user_id, days=0, saved_money=0, relapses=1, updated_at=now)
             self.session.add(metrics)
         else:
-            old_relapses = metrics.relapses
             metrics.relapses += 1
-            # Сбрасываем дни только если количество рецидивов превысило 3
-            if old_relapses <= 3 and metrics.relapses > 3:
-                metrics.days = 0
             metrics.updated_at = now
         
         await self.session.flush()
