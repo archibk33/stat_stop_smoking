@@ -30,7 +30,7 @@ logger.info("Registration handlers module loaded successfully")
 
 def _parse_user_date(date_str: str) -> Optional[datetime]:
     """
-    Допускаем форматы: YYYY-MM-DD и DD.MM.YYYY.
+    Допускаем форматы: ГОД-МЕСЯЦ-ДЕНЬ (например: 2025-01-31) и DD.MM.YYYY.
     Возвращаем timezone-aware datetime (UTC) или None, если дата некорректна/будущая.
     """
     candidates = ["%Y-%m-%d", "%d.%m.%Y"]
@@ -49,7 +49,7 @@ def _parse_user_date(date_str: str) -> Optional[datetime]:
 logger.info("Registering registration handlers:")
 logger.info("- reg_start: callback_query with data='reg:start'")
 logger.info("- reg_date: callback_query with data starting with 'reg:date:'")
-logger.info("- reg_date_custom: message with regex pattern '^\\d{4}-\\d{2}-\\d{2}$'")
+logger.info("- reg_date_custom: message with regex pattern '^\\d{4}-\\d{2}-\\d{2}$' (ГОД-МЕСЯЦ-ДЕНЬ)")
 logger.info("- reg_price: callback_query with data starting with 'reg:price:'")
 logger.info("- reg_price_custom: message with regex pattern '^\\d+(?:[\\.,]\\d+)?$'")
 
@@ -103,6 +103,20 @@ async def reg_start(callback: CallbackQuery) -> None:
     logger.info(f"=== REG_START DEBUG END ===")
 
 
+@router.callback_query(F.data == "reg:date_menu")
+async def reg_date_menu(callback: CallbackQuery) -> None:
+    """Возврат к меню выбора даты при ошибке ввода"""
+    await callback.answer()
+    user_id = callback.from_user.id
+    logger.info(f"User {user_id} returned to date menu after error")
+    
+    # Сбрасываем состояние для повторного выбора
+    if user_id in REG_STATE:
+        REG_STATE[user_id] = None
+    
+    await update_message_with_menu(callback, "Дата последней сигареты:", date_selection_kb())
+
+
 @router.callback_query(F.data.startswith("reg:date:"))
 async def reg_date(callback: CallbackQuery, session_factory: async_sessionmaker[AsyncSession]) -> None:
     await callback.answer()
@@ -133,7 +147,7 @@ async def reg_date(callback: CallbackQuery, session_factory: async_sessionmaker[
         REG_STATE[user_id] = None  # Временно устанавливаем None, дата будет установлена позже
         logger.info(f"Added user {user_id} to REG_STATE for custom date input")
         logger.info(f"REG_STATE after custom date selection: {REG_STATE}")
-        await update_message_with_menu(callback, "Введите дату в формате YYYY-MM-DD", InlineKeyboardMarkup(inline_keyboard=[]))
+        await update_message_with_menu(callback, "Введите дату в формате ГОД-МЕСЯЦ-ДЕНЬ (например: 2025-01-31)", InlineKeyboardMarkup(inline_keyboard=[]))
         logger.info(f"Custom date input prompt sent to user {user_id}")
         return
     else:
@@ -190,9 +204,20 @@ async def reg_date_custom(message: Message) -> None:
         # Используем новую функцию валидации даты
         last_smoke = _parse_user_date(message.text)
         if not last_smoke:
-            temp_kb = InlineKeyboardMarkup(inline_keyboard=[])
-            temp_kb.inline_keyboard.append([InlineKeyboardButton(text="🏠 Главное меню", callback_data="menu:main")])
-            await message.answer("Некорректная дата. Пример: 2024-12-31 или 31.12.2024. Дата не должна быть в будущем.", reply_markup=temp_kb)
+            # При ошибке даты предлагаем повторный ввод или возврат к выбору даты
+            error_kb = InlineKeyboardMarkup(
+                inline_keyboard=[
+                    [InlineKeyboardButton(text="📅 Выбрать дату из списка", callback_data="reg:date_menu")],
+                    [InlineKeyboardButton(text="🏠 Главное меню", callback_data="menu:main")],
+                ]
+            )
+            await message.answer(
+                "❌ Некорректная дата!\n\n"
+                "Попробуйте еще раз или выберите дату из списка.\n\n"
+                "Правильный формат: ГОД-МЕСЯЦ-ДЕНЬ (например: 2025-01-31) или ДЕНЬ.МЕСЯЦ.ГОД (например: 31.01.2025)\n\n"
+                "⚠️ Дата не должна быть в будущем.",
+                reply_markup=error_kb
+            )
             return
         
         # Конвертируем datetime в date для совместимости
@@ -216,12 +241,38 @@ async def reg_date_custom(message: Message) -> None:
         logger.error(f"Error in reg_date_custom for user {message.from_user.id}: {e}", exc_info=True)
         # Отправляем сообщение об ошибке пользователю
         try:
-            temp_kb = InlineKeyboardMarkup(inline_keyboard=[])
-            temp_kb.inline_keyboard.append([InlineKeyboardButton(text="🏠 Главное меню", callback_data="menu:main")])
-            await message.answer("Произошла ошибка при обработке даты. Попробуйте еще раз или начните регистрацию заново.", reply_markup=temp_kb)
+            error_kb = InlineKeyboardMarkup(
+                inline_keyboard=[
+                    [InlineKeyboardButton(text="📅 Выбрать дату из списка", callback_data="reg:date_menu")],
+                    [InlineKeyboardButton(text="🔄 Начать регистрацию заново", callback_data="reg:start")],
+                    [InlineKeyboardButton(text="🏠 Главное меню", callback_data="menu:main")],
+                ]
+            )
+            await message.answer("Произошла ошибка при обработке даты. Попробуйте еще раз!", reply_markup=error_kb)
         except Exception as send_error:
             logger.error(f"Failed to send error message to user {message.from_user.id}: {send_error}")
         logger.info(f"=== REG_DATE_CUSTOM ERROR END ===")
+
+
+@router.callback_query(F.data == "reg:price_menu")
+async def reg_price_menu(callback: CallbackQuery) -> None:
+    """Возврат к меню выбора цены при ошибке ввода"""
+    await callback.answer()
+    user_id = callback.from_user.id
+    logger.info(f"User {user_id} returned to price menu after error")
+    
+    # Проверяем, что у пользователя есть дата
+    qd = REG_STATE.get(user_id)
+    if qd is None:
+        # Если нет даты, отправляем к выбору даты
+        await update_message_with_menu(callback, "Сначала выберите дату:", date_selection_kb())
+        return
+    
+    await update_message_with_menu(
+        callback,
+        f"Выбрана дата: {qd.isoformat()}\nТеперь выберите цену пачки:",
+        price_menu_kb()
+    )
 
 
 @router.callback_query(F.data.startswith("reg:price:"))
@@ -290,14 +341,40 @@ async def reg_price_custom(message: Message, session_factory: async_sessionmaker
         
         try:
             price = float(message.text.replace(",", "."))  # type: ignore[union-attr]
+            
+            # Проверяем разумные границы цены
+            if price <= 0 or price > 10000:
+                error_kb = InlineKeyboardMarkup(
+                    inline_keyboard=[
+                        [InlineKeyboardButton(text="💰 Выбрать цену из списка", callback_data="reg:price_menu")],
+                        [InlineKeyboardButton(text="🏠 Главное меню", callback_data="menu:main")],
+                    ]
+                )
+                await message.answer(
+                    "❌ Цена должна быть от 1 до 10000 рублей!\n\n"
+                    "Попробуйте еще раз или выберите цену из списка.",
+                    reply_markup=error_kb
+                )
+                return
+            
             logger.info(f"Parsed price {price} for user {user_id}")
             await save_and_confirm(message, session_factory, user_id, price)
             logger.info(f"save_and_confirm completed for user {user_id}")
         except ValueError:
-            # Обрабатываем ошибку парсинга цены
-            temp_kb = InlineKeyboardMarkup(inline_keyboard=[])
-            temp_kb.inline_keyboard.append([InlineKeyboardButton(text="🏠 Главное меню", callback_data="menu:main")])
-            await message.answer("Неверная цена. Введите число (например: 250 или 250.50)", reply_markup=temp_kb)
+            # При ошибке цены предлагаем повторный ввод или возврат к выбору цены
+            error_kb = InlineKeyboardMarkup(
+                inline_keyboard=[
+                    [InlineKeyboardButton(text="💰 Выбрать цену из списка", callback_data="reg:price_menu")],
+                    [InlineKeyboardButton(text="🏠 Главное меню", callback_data="menu:main")],
+                ]
+            )
+            await message.answer(
+                "❌ Неверная цена!\n\n"
+                "Попробуйте еще раз или выберите цену из списка.\n\n"
+                "Правильный формат: число (например: 250 или 250.50)\n\n"
+                "💡 Можно использовать точку или запятую для десятичных дробей.",
+                reply_markup=error_kb
+            )
             return
         
         logger.info(f"=== REG_PRICE_CUSTOM DEBUG END ===")
@@ -306,9 +383,14 @@ async def reg_price_custom(message: Message, session_factory: async_sessionmaker
         logger.error(f"Error in reg_price_custom for user {message.from_user.id}: {e}", exc_info=True)
         # Отправляем сообщение об ошибке пользователю
         try:
-            temp_kb = InlineKeyboardMarkup(inline_keyboard=[])
-            temp_kb.inline_keyboard.append([InlineKeyboardButton(text="🏠 Главное меню", callback_data="menu:main")])
-            await message.answer("Произошла ошибка при обработке цены. Попробуйте еще раз или начните регистрацию заново.", reply_markup=temp_kb)
+            error_kb = InlineKeyboardMarkup(
+                inline_keyboard=[
+                    [InlineKeyboardButton(text="💰 Выбрать цену из списка", callback_data="reg:price_menu")],
+                    [InlineKeyboardButton(text="🔄 Начать регистрацию заново", callback_data="reg:start")],
+                    [InlineKeyboardButton(text="🏠 Главное меню", callback_data="menu:main")],
+                ]
+            )
+            await message.answer("Произошла ошибка при обработке цены. Попробуйте еще раз!", reply_markup=error_kb)
         except Exception as send_error:
             logger.error(f"Failed to send error message to user {message.from_user.id}: {send_error}")
         logger.info(f"=== REG_PRICE_CUSTOM ERROR END ===")
